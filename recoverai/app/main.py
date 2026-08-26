@@ -200,7 +200,10 @@ def verify_payment(req: schemas.VerifyPaymentRequest, db: Session = Depends(get_
         case.status = "RECOVERED"
         case.recovered = True
         case.recovered_amount = case.amount
-        minutes = (datetime.utcnow() - case.created_at).total_seconds() / 60
+        if req.simulated_minutes is not None:
+            minutes = req.simulated_minutes
+        else:
+            minutes = (datetime.utcnow() - case.created_at).total_seconds() / 60
         case.recovery_time_minutes = round(minutes, 2)
         if intervention:
             intervention.result = "SUCCESS"
@@ -275,7 +278,7 @@ def get_metrics(db: Session = Depends(get_db)):
     ai_eligible = len(ai_cohort)
     ai_recovered_count = sum(1 for c in ai_cohort if c.recovered)
 
-    recovery_times = [c.recovery_time_minutes for c in all_cases if c.recovery_time_minutes]
+    recovery_times = [c.recovery_time_minutes for c in all_cases if c.recovery_time_minutes is not None]
     avg_time = round(sum(recovery_times) / len(recovery_times), 2) if recovery_times else None
     median_time = None
     if recovery_times:

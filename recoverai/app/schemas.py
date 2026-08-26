@@ -44,6 +44,7 @@ class ExecuteActionRequest(BaseModel):
 class VerifyPaymentRequest(BaseModel):
     case_id: str
     payment_succeeded: Optional[bool] = None  # None = simulate/unknown -> VERIFY_PENDING
+    simulated_minutes: Optional[float] = None  # for seeding realistic time-to-recovery in demos
 
 
 class ReviewRequest(BaseModel):
