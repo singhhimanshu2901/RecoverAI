@@ -307,7 +307,17 @@ def get_metrics(db: Session = Depends(get_db)):
     }
 
 
-# ---------------- 9. Audit log ----------------
+# ---------------- 9. Admin: reset all data (for demo/dataset regeneration) ----------------
+@app.post("/admin/reset")
+def reset_data(db: Session = Depends(get_db)):
+    db.query(models.AuditEvent).delete()
+    db.query(models.Intervention).delete()
+    db.query(models.RecoveryCase).delete()
+    db.commit()
+    return {"status": "reset_complete"}
+
+
+# ---------------- 10. Audit log ----------------
 @app.get("/audit")
 def get_audit(case_id: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)):
     q = db.query(models.AuditEvent)
