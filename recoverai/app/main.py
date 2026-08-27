@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from .database import engine, get_db
-from . import models, schemas, recovery_engine as re
+from . import models, schemas, recovery_engine as re, razorpay_adapter
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -40,6 +40,16 @@ def log_audit(db: Session, case_id: str, event_type: str, payload: dict):
 @app.get("/")
 def root():
     return {"service": "RecoverAI", "status": "running"}
+
+
+@app.get("/model/status")
+def model_status():
+    model = re._load_model()
+    return {
+        "scoring_mode": "xgboost_ml_model" if model is not None else "rule_based",
+        "model_loaded": model is not None,
+        "payment_provider_mode": "live_sandbox" if razorpay_adapter.is_live_mode() else "mock",
+    }
 
 
 # ---------------- 1. Event ingestion ----------------
@@ -145,6 +155,14 @@ def execute_action(req: schemas.ExecuteActionRequest, db: Session = Depends(get_
 
     final_action = decision["final_action"]
 
+    # Real/mock payment-provider action for actions that need a customer-facing link
+    provider_result = None
+    if decision["approved"] and final_action == "PAYMENT_LINK":
+        provider_result = razorpay_adapter.create_payment_link(
+            amount_rupees=case.amount, customer_id=case.customer_id,
+            case_id=case.id, description=f"Payment recovery — {case.payment_id}",
+        )
+
     intervention = models.Intervention(
         id=str(uuid.uuid4()),
         case_id=case.id,
@@ -152,6 +170,7 @@ def execute_action(req: schemas.ExecuteActionRequest, db: Session = Depends(get_
         result="PENDING" if decision["approved"] else "REJECTED",
         payment_state_before=case.status,
         policy_version=re.POLICY_VERSION,
+        template_id=provider_result.get("payment_link_id") if provider_result else None,
     )
     db.add(intervention)
 
@@ -175,6 +194,7 @@ def execute_action(req: schemas.ExecuteActionRequest, db: Session = Depends(get_
     log_audit(db, case.id, "ACTION_EXECUTED", {
         "proposed": proposed_action, "final": final_action,
         "approved": decision["approved"], "reason": decision["reason"],
+        "provider_result": provider_result,
     })
     return case
 
@@ -191,7 +211,6 @@ def verify_payment(req: schemas.VerifyPaymentRequest, db: Session = Depends(get_
     ).order_by(models.Intervention.timestamp.desc()).first()
 
     if req.payment_succeeded is None:
-        # Verification API unavailable / unknown -> safe fallback (section 19)
         case.status = "VERIFY_PENDING"
         if intervention:
             intervention.result = "VERIFY_PENDING"
@@ -209,7 +228,7 @@ def verify_payment(req: schemas.VerifyPaymentRequest, db: Session = Depends(get_
             intervention.result = "SUCCESS"
         log_audit(db, case.id, "RECOVERED", {"amount": case.amount, "time_minutes": case.recovery_time_minutes})
     else:
-        case.status = "OPEN"  # can loop back for another attempt within policy limits
+        case.status = "OPEN"
         if intervention:
             intervention.result = "FAILED"
         log_audit(db, case.id, "VERIFY_FAILED", {})

@@ -1,9 +1,37 @@
 """
 Core recovery decision logic.
-Rule-based scoring for MVP speed (swap with XGBoost model later via score_with_model()).
+Rule-based scoring by default; automatically swaps to a trained XGBoost
+model (app/model.pkl) if one has been trained via train_model.py.
 Deterministic policy engine — AI/scoring only RECOMMENDS, this layer AUTHORIZES.
 """
+import os
+import pickle
 from datetime import datetime, timedelta
+
+_MODEL = None
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
+_MODEL_LOADED = False
+
+
+def _load_model():
+    """Lazy-load the trained model once, if it exists. Never raises."""
+    global _MODEL, _MODEL_LOADED
+    if _MODEL_LOADED:
+        return _MODEL
+    _MODEL_LOADED = True
+    if os.path.exists(_MODEL_PATH):
+        try:
+            with open(_MODEL_PATH, "rb") as f:
+                _MODEL = pickle.load(f)
+        except Exception:
+            _MODEL = None
+    return _MODEL
+
+
+FAILURE_CODE_MAP = {
+    "RETRYABLE": 0, "INSUFFICIENT_FUNDS": 1, "CARD_EXPIRED": 2,
+    "CUSTOMER_ACTION_REQUIRED": 3, "BANK_DECLINE": 4,
+}
 
 # ---- Hard policy limits (from project blueprint, section 18) ----
 MAX_RETRIES = 2
@@ -15,9 +43,38 @@ POLICY_VERSION = "v1"
 
 def calculate_recovery_score(case: dict) -> float:
     """
-    Rule-based recovery probability (0-1). Inputs come from the case dict.
-    Swap this function for an XGBoost model call later without changing callers.
+    Recovery probability (0-1). Uses the trained XGBoost model
+    (app/model.pkl) when available; otherwise falls back to the
+    transparent rule-based scorer below. Swappable with zero changes
+    to any caller -- this is the only entry point they use.
     """
+    model = _load_model()
+    if model is not None:
+        try:
+            return _score_with_model(model, case)
+        except Exception:
+            pass  # fall through to rule-based on any inference error
+
+    return _rule_based_score(case)
+
+
+def _score_with_model(model, case: dict) -> float:
+    total = case.get("previous_success_count", 0) + case.get("previous_failure_count", 0)
+    history_ratio = case.get("previous_success_count", 0) / total if total else 0.5
+    features = [[
+        case.get("amount", 0),
+        case.get("previous_success_count", 0),
+        case.get("previous_failure_count", 0),
+        history_ratio,
+        case.get("subscription_age_days", 0),
+        case.get("attempt_number", 0),
+        FAILURE_CODE_MAP.get(case.get("failure_code", ""), 5),
+    ]]
+    prob = model.predict_proba(features)[0][1]
+    return round(float(max(0.0, min(1.0, prob))), 3)
+
+
+def _rule_based_score(case: dict) -> float:
     score = 0.5  # base
 
     success = case.get("previous_success_count", 0)

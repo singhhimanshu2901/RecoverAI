@@ -25,6 +25,9 @@ class CaseOut(BaseModel):
     priority: str
     failure_code: Optional[str]
     attempt_number: int
+    previous_success_count: int
+    previous_failure_count: int
+    subscription_age_days: int
     recovery_score: Optional[float]
     expected_value: Optional[float]
     recommended_action: Optional[str]
