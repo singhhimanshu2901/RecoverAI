@@ -28,10 +28,8 @@ def _load_model():
     return _MODEL
 
 
-FAILURE_CODE_MAP = {
-    "RETRYABLE": 0, "INSUFFICIENT_FUNDS": 1, "CARD_EXPIRED": 2,
-    "CUSTOMER_ACTION_REQUIRED": 3, "BANK_DECLINE": 4,
-}
+FAILURE_CODES = ["RETRYABLE", "INSUFFICIENT_FUNDS", "CARD_EXPIRED",
+                  "CUSTOMER_ACTION_REQUIRED", "BANK_DECLINE"]
 
 # ---- Hard policy limits (from project blueprint, section 18) ----
 MAX_RETRIES = 2
@@ -59,8 +57,15 @@ def calculate_recovery_score(case: dict) -> float:
 
 
 def _score_with_model(model, case: dict) -> float:
+    """
+    Feature encoding here MUST match train_model.py::featurize exactly
+    (train/serve skew is a classic source of silent ML bugs).
+    """
     total = case.get("previous_success_count", 0) + case.get("previous_failure_count", 0)
     history_ratio = case.get("previous_success_count", 0) / total if total else 0.5
+    failure_code = case.get("failure_code", "")
+    one_hot = [1.0 if failure_code == code else 0.0 for code in FAILURE_CODES]
+
     features = [[
         case.get("amount", 0),
         case.get("previous_success_count", 0),
@@ -68,11 +73,11 @@ def _score_with_model(model, case: dict) -> float:
         history_ratio,
         case.get("subscription_age_days", 0),
         case.get("attempt_number", 0),
-        FAILURE_CODE_MAP.get(case.get("failure_code", ""), 5),
+        1.0 if case.get("subscription_age_days", 0) > 180 else 0.0,
+        *one_hot,
     ]]
     prob = model.predict_proba(features)[0][1]
     return round(float(max(0.0, min(1.0, prob))), 3)
-
 
 def _rule_based_score(case: dict) -> float:
     score = 0.5  # base

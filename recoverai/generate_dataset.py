@@ -81,7 +81,9 @@ def true_recovery_probability(amount, success, failure, failure_code, sub_age_da
     if amount > 20000:
         p -= 0.1
 
-    p += random.uniform(-0.1, 0.1)  # noise
+    p += random.uniform(-0.04, 0.04)  # small noise -- keeps outcomes realistic
+    # without drowning out the underlying signal, so the trained model has
+    # something learnable
     return max(0.02, min(0.97, p))
 
 

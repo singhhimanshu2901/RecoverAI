@@ -335,6 +335,42 @@ def reset_data(db: Session = Depends(get_db)):
     db.commit()
     return {"status": "reset_complete"}
 
+# ---------------- 11. Analytics breakdowns ----------------
+@app.get("/recovery/analytics")
+def get_analytics(db: Session = Depends(get_db)):
+    all_cases = db.query(models.RecoveryCase).all()
+
+    by_failure = {}
+    for c in all_cases:
+        key = c.failure_code or "UNKNOWN"
+        d = by_failure.setdefault(key, {"total": 0, "recovered": 0, "amount_recovered": 0.0})
+        d["total"] += 1
+        if c.recovered:
+            d["recovered"] += 1
+            d["amount_recovered"] += c.recovered_amount
+
+    by_action = {}
+    for c in all_cases:
+        key = c.recommended_action or "UNSCORED"
+        d = by_action.setdefault(key, {"total": 0, "recovered": 0, "amount_recovered": 0.0})
+        d["total"] += 1
+        if c.recovered:
+            d["recovered"] += 1
+            d["amount_recovered"] += c.recovered_amount
+
+    by_status = {}
+    for c in all_cases:
+        by_status[c.status] = by_status.get(c.status, 0) + 1
+
+    def with_rate(d):
+        return {k: {**v, "recovery_rate": round(v["recovered"] / v["total"], 4) if v["total"] else 0}
+                for k, v in d.items()}
+
+    return {
+        "by_failure_code": with_rate(by_failure),
+        "by_recommended_action": with_rate(by_action),
+        "by_status": by_status,
+    }
 
 # ---------------- 10. Audit log ----------------
 @app.get("/audit")

@@ -6,7 +6,7 @@ import {
 import {
   Activity, IndianRupee, TrendingUp, Clock, ShieldAlert, ListChecks,
   ScrollText, RefreshCw, ChevronRight, AlertTriangle, CheckCircle2,
-  XCircle, PauseCircle, Search,
+  XCircle, PauseCircle, Search, BarChart3, Cpu, Zap,
 } from "lucide-react";
 
 const API = "https://recoverai-soqt.onrender.com";
@@ -388,8 +388,137 @@ function AuditScreen() {
 const TABS = [
   { id: "overview", label: "Overview", icon: Activity },
   { id: "queue", label: "Recovery queue", icon: ListChecks },
+  { id: "analytics", label: "Analytics", icon: BarChart3 },
   { id: "audit", label: "Audit", icon: ScrollText },
+  { id: "system", label: "System", icon: Cpu },
 ];
+
+const FAILURE_LABELS = {
+  RETRYABLE: "Retryable", INSUFFICIENT_FUNDS: "Insufficient funds",
+  CARD_EXPIRED: "Card expired", CUSTOMER_ACTION_REQUIRED: "Customer action required",
+  BANK_DECLINE: "Bank decline", UNKNOWN: "Unknown",
+};
+
+function AnalyticsScreen() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiGet("/recovery/analytics").then((d) => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ padding: 24, textAlign: "center", color: MUTED, fontSize: 13 }}>Loading analytics…</div>;
+  if (!data) return null;
+
+  const failureRows = Object.entries(data.by_failure_code || {})
+    .sort((a, b) => b[1].total - a[1].total);
+  const actionRows = Object.entries(data.by_recommended_action || {})
+    .sort((a, b) => b[1].total - a[1].total);
+  const actionChartData = actionRows.map(([k, v]) => ({ name: k, value: v.amount_recovered }));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>Revenue recovered by action taken</div>
+        <ResponsiveContainer width="100%" height={200}>
+          <BarChart data={actionChartData} barSize={44}>
+            <CartesianGrid strokeDasharray="3 3" stroke={BORDER} vertical={false} />
+            <XAxis dataKey="name" tick={{ fill: MUTED, fontSize: 11 }} axisLine={{ stroke: BORDER }} tickLine={false} />
+            <YAxis tick={{ fill: MUTED, fontSize: 11 }} axisLine={false} tickLine={false}
+              tickFormatter={(v) => "\u20B9" + (v / 1000).toFixed(0) + "k"} />
+            <Tooltip contentStyle={{ background: SURFACE_2, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: TEXT }} formatter={(v) => fmtINR(v)} />
+            <Bar dataKey="value" fill={BLUE} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 12 }}>Recovery rate by failure reason</div>
+          {failureRows.map(([code, v]) => (
+            <div key={code} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 5 }}>
+                <span>{FAILURE_LABELS[code] || code}</span>
+                <span style={{ fontFamily: MONO, color: MUTED }}>{v.recovered}/{v.total} · {fmtPct(v.recovery_rate)}</span>
+              </div>
+              <div style={{ height: 5, background: SURFACE_2, borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: (v.recovery_rate * 100) + "%", background: EMERALD, borderRadius: 3 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 12 }}>Case status distribution</div>
+          {Object.entries(data.by_status || {}).map(([status, count]) => {
+            const s = STATUS_STYLE[status] || STATUS_STYLE.OPEN;
+            return (
+              <div key={status} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <StatusBadge status={status} />
+                <span style={{ fontFamily: MONO, fontSize: 13 }}>{count}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SystemScreen() {
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    apiGet("/model/status").then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  if (!status) return <div style={{ padding: 24, textAlign: "center", color: MUTED, fontSize: 13 }}>Loading system status…</div>;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+      <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+          <Zap size={15} color={EMERALD} />
+          <span style={{ fontSize: 13, color: MUTED }}>Recovery scoring engine</span>
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>
+          {status.scoring_mode === "xgboost_ml_model" ? "XGBoost ML model" : "Rule-based scorer"}
+        </div>
+        <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.6 }}>
+          {status.scoring_mode === "xgboost_ml_model"
+            ? "Trained on historical case outcomes. Falls back to the transparent rule-based scorer automatically on any inference error."
+            : "No trained model found yet — using the transparent, auditable rule-based scorer. Run train_model.py once enough labeled cases exist."}
+        </div>
+      </div>
+
+      <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+          <IndianRupee size={15} color={BLUE} />
+          <span style={{ fontSize: 13, color: MUTED }}>Payment provider</span>
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>
+          {status.payment_provider_mode === "live_sandbox" ? "Razorpay sandbox (live)" : "Mock mode"}
+        </div>
+        <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.6 }}>
+          {status.payment_provider_mode === "live_sandbox"
+            ? "Connected to Razorpay test-mode credentials. Payment links are created via the real sandbox API."
+            : "No Razorpay sandbox credentials configured — payment links are simulated so the full recovery loop still runs end-to-end for demos."}
+        </div>
+      </div>
+
+      <div style={{ gridColumn: "1 / -1", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ fontSize: 13, color: MUTED, marginBottom: 10 }}>Policy limits (hard-coded, deterministic)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, fontSize: 12.5 }}>
+          <div><span style={{ color: MUTED }}>Max retries</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>2</span></div>
+          <div><span style={{ color: MUTED }}>Max messages</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>2</span></div>
+          <div><span style={{ color: MUTED }}>Cooldown</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>6h</span></div>
+          <div><span style={{ color: MUTED }}>Max recovery window</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>72h</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState("overview");
@@ -472,7 +601,9 @@ export default function App() {
           <>
             {tab === "overview" && <OverviewScreen metrics={metrics} />}
             {tab === "queue" && <CaseQueue cases={cases} onSelect={setSelectedCase} loading={loading} />}
+            {tab === "analytics" && <AnalyticsScreen />}
             {tab === "audit" && <AuditScreen />}
+            {tab === "system" && <SystemScreen />}
           </>
         )}
       </div>
