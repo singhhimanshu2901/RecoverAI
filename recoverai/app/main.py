@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -237,6 +237,54 @@ def verify_payment(req: schemas.VerifyPaymentRequest, db: Session = Depends(get_
     db.refresh(case)
     return case
 
+# ---------------- 6. Razorpay webhook (real payment confirmations) ----------------
+@app.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Receives real Razorpay events (e.g. payment_link.paid) when a customer
+    actually completes a test-mode payment. Verifies the webhook signature,
+    finds the matching case via the payment_link_id stored on its
+    intervention, and marks it recovered using real gateway confirmation --
+    not a simulated outcome.
+    """
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    if not razorpay_adapter.verify_webhook_signature(body, signature):
+        raise HTTPException(400, "Invalid or unverifiable webhook signature")
+
+    payload = json.loads(body)
+    event = payload.get("event", "")
+
+    if event != "payment_link.paid":
+        return {"status": "ignored", "event": event}
+
+    link_id = payload.get("payload", {}).get("payment_link", {}).get("entity", {}).get("id")
+    if not link_id:
+        return {"status": "ignored", "reason": "no payment_link id in payload"}
+
+    intervention = db.query(models.Intervention).filter(
+        models.Intervention.template_id == link_id
+    ).first()
+    if not intervention:
+        return {"status": "ignored", "reason": "no matching intervention for this payment link"}
+
+    case = db.query(models.RecoveryCase).filter(models.RecoveryCase.id == intervention.case_id).first()
+    if not case or case.recovered:
+        return {"status": "ignored", "reason": "case not found or already recovered"}
+
+    case.status = "RECOVERED"
+    case.recovered = True
+    case.recovered_amount = case.amount
+    minutes = (datetime.utcnow() - case.created_at).total_seconds() / 60
+    case.recovery_time_minutes = round(minutes, 2)
+    intervention.result = "SUCCESS"
+    db.commit()
+
+    log_audit(db, case.id, "RECOVERED_VIA_WEBHOOK", {
+        "payment_link_id": link_id, "amount": case.amount, "source": "razorpay_live_webhook",
+    })
+    return {"status": "recovered", "case_id": case.id}
 
 # ---------------- 6. Human review override ----------------
 @app.post("/review/{case_id}", response_model=schemas.CaseOut)

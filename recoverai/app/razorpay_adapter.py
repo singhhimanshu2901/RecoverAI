@@ -78,3 +78,24 @@ def check_payment_status(payment_link_id: str) -> dict:
             return {"mode": "live_sandbox_error", "error": str(e)}
 
     return {"mode": "mock", "status": "unknown", "note": "mock link -- verify via /recovery/verify instead"}
+
+
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+
+
+def verify_webhook_signature(payload_body: bytes, signature: str) -> bool:
+    """
+    Verify a Razorpay webhook came from Razorpay and wasn't tampered with,
+    using the shared webhook secret configured both in the Razorpay
+    dashboard and as the RAZORPAY_WEBHOOK_SECRET env var. If the SDK/secret
+    isn't available, reject by default -- fail closed, not open.
+    """
+    if not (_LIVE_MODE and RAZORPAY_WEBHOOK_SECRET):
+        return False
+    try:
+        _client.utility.verify_webhook_signature(
+            payload_body.decode("utf-8"), signature, RAZORPAY_WEBHOOK_SECRET
+        )
+        return True
+    except Exception:
+        return False
