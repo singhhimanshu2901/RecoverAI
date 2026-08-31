@@ -24,11 +24,11 @@ Every step is logged to an audit trail.
 
 | Metric | Value |
 |---|---|
-| Revenue at risk | ₹28,14,392 |
-| Revenue recovered | ₹13,62,187 |
-| Recovery rate | 67.4% |
-| Incremental recovery vs. baseline | ₹6,50,730 |
-| Median time to recovery | 3h 7m |
+| Revenue at risk | ₹27,34,692 |
+| Revenue recovered | ₹11,53,976 |
+| Recovery rate | 65.7% |
+| Incremental recovery vs. baseline | ₹5,51,469 |
+| Median time to recovery | 3h 10m |
 | Cases in batch | 500 (synthetic, sandbox) |
 
 These numbers update live on the dashboard as new payment-failed events are
@@ -47,9 +47,10 @@ Payment Event → FastAPI Ingestion → Revenue-at-Risk Detector → Recovery Ca
 |---|---|
 | Backend API | FastAPI (Python), deployed on Render |
 | Database | PostgreSQL (Neon, persistent) |
-| Recovery scoring | Rule-based probability model (swappable for XGBoost) |
+| Recovery scoring | XGBoost model (one-hot features, cross-validated) with automatic rule-based fallback |
 | Policy engine | Deterministic — hard caps on retries, messages, cooldown, window |
-| Frontend | React + Vite, deployed on Vercel |
+| Payment provider | Razorpay sandbox adapter — real test-mode API if credentials are set, transparent mock mode otherwise |
+| Frontend | React + Vite, deployed on Vercel — 5 screens (Overview, Recovery Queue, Analytics, Audit, System) |
 | Dataset | 500 synthetic recovery cases, AI cohort vs. baseline cohort |
 
 ## 4. Why This Needed AI (Not Just a Retry Script)
@@ -57,15 +58,19 @@ Payment Event → FastAPI Ingestion → Revenue-at-Risk Detector → Recovery Ca
 A rule like "payment failed → send reminder" ignores context. RecoverAI's
 AI layer:
 - **Diagnoses** the failure category from the error code and context
-- **Scores** recovery probability using customer history, subscription age,
-  and failure type
+- **Scores** recovery probability using a trained XGBoost model (customer
+  history, subscription age, failure type — one-hot encoded, cross-validated)
+  that automatically falls back to a transparent rule-based scorer if the
+  model is unavailable or errors during inference
 - **Prioritizes** by *expected value* (amount × probability − cost), not
   raw amount — a ₹10,000 case at 70% probability can outrank a ₹1,00,000
   case at 15% probability
 - **Selects** the next-best-action from an approved, bounded set
 
 The policy engine then either authorizes or rejects that recommendation
-before anything reaches a customer or a payment gateway.
+before anything reaches a customer or a payment gateway. The `/model/status`
+endpoint (and the dashboard's **System** tab) always shows which scoring
+mode and payment-provider mode are currently active — nothing is hidden.
 
 ## 5. Safety & Bounded Automation
 
@@ -91,9 +96,25 @@ the attribution window. We run two cohorts side by side:
 
 The dashboard reports both **gross recovery** and **incremental recovery**
 (AI cohort minus baseline) so the actual uplift from the agent is visible,
-not just total money moved.
+not just total money moved. The **Analytics** tab breaks this down further
+by failure reason and by recommended action, so it's clear *which*
+interventions and *which* failure types drive the recovered revenue.
 
-## 7. Demo Script (3–5 minutes)
+## 7. Dashboard Screens
+
+| Screen | What it shows |
+|---|---|
+| **Overview** | Live recovery pulse, headline metrics, baseline vs. AI chart |
+| **Recovery Queue** | Filterable/searchable live case list with score, expected value, action, status |
+| **Analytics** | Revenue recovered by action taken, recovery rate by failure reason, case status distribution |
+| **Audit** | Full immutable event log across all cases (policy version, timestamps, outcomes) |
+| **System** | Which scoring engine (XGBoost vs. rule-based) and payment-provider mode (live sandbox vs. mock) are active right now, plus the hard-coded policy limits |
+
+Clicking any case in the Recovery Queue opens a detail view with the AI
+reasoning (score, expected value, recommended action) and that case's full
+audit trail.
+
+## 8. Demo Script (3–5 minutes)
 
 1. **Open the dashboard** (`recover-ai-2901.vercel.app`) — the pulse header
    shows ₹13.6L already recovered of ₹28.1L at risk in this batch.
@@ -108,14 +129,21 @@ not just total money moved.
 5. **Show the Baseline vs. RecoverAI chart** — this is the proof: the AI
    cohort recovers meaningfully more than the naive baseline on the same
    at-risk revenue.
-6. **Open `/docs` (FastAPI Swagger)** — show the actual API: `POST
+6. **Open the Analytics tab** — recovery rate broken down by failure
+   reason, and revenue recovered broken down by which action was taken.
+   This shows the system isn't a black box about *why* money came back.
+7. **Open the System tab** — shows exactly which scoring engine (XGBoost
+   model vs. rule-based fallback) and which payment-provider mode (live
+   Razorpay sandbox vs. mock) are active right now, plus the hard policy
+   limits. Full transparency, nothing hidden from the judges.
+8. **Open `/docs` (FastAPI Swagger)** — show the actual API: `POST
    /events/payment-failed`, `POST /recovery/analyze`, `POST
    /recovery/execute`, `POST /recovery/verify`. This is a real, callable
    backend, not a mockup.
-7. **Close on the audit tab** — every decision is logged with a policy
+9. **Close on the Audit tab** — every decision is logged with a policy
    version, timestamp, and outcome. Nothing is a black box.
 
-## 8. One-Minute Pitch
+## 9. One-Minute Pitch
 
 > RecoverAI is an AI revenue-recovery agent for merchants. When a payment
 > fails, it doesn't just raise an alert — it diagnoses the failure,
@@ -128,7 +156,7 @@ not just total money moved.
 > recovered ₹13.6L of ₹28.1L at risk across 500 sandbox cases, a 67.4%
 > recovery rate.
 
-## 9. Anticipated Judge Questions
+## 10. Anticipated Judge Questions
 
 **How do you prove the agent recovered the money?**
 Each intervention has a unique ID and timestamp; we verify the payment
@@ -149,33 +177,48 @@ suggestions to the model.
 The case moves to `VERIFY_PENDING`, automation pauses, and it's queued for
 human verification. The system never reports a recovery without evidence.
 
+**How good is the ML model, really?**
+Trained via 5-fold cross-validation on the current synthetic batch (~500
+cases, ~190 with a resolved outcome). On a dataset this size the model
+gives a modest but real lift over chance. We report cross-validated AUC
+rather than a single train/test split because a single split on ~190 rows
+is too noisy to trust on its own. If the model errors or underperforms,
+`calculate_recovery_score()` automatically falls back to the transparent
+rule-based scorer — the system is designed to never depend on the ML model
+working. More historical data in production would directly improve it;
+the training/serving code is already structured for that (`train_model.py`
+retrains from live case outcomes with one command).
+
 **Is this production-ready?**
 This prototype runs on sandbox/synthetic data end-to-end (FastAPI backend,
 persistent Postgres, live React dashboard). Production would add real
-Razorpay sandbox/live integration, merchant auth, and larger-scale
-validation — the architecture (adapter layer between AI logic and payment
-API) is already designed for that swap.
+Razorpay live-mode integration (the adapter already supports real sandbox
+credentials via env vars — it's a config change, not a rewrite), merchant
+auth, and larger-scale validation.
 
-## 10. What's Deliberately Out of Scope (v1)
+## 11. What's Deliberately Out of Scope (v1)
 
 - Real-money transactions (sandbox/synthetic only)
 - Unlimited retries or messaging
 - Hinglish voice recovery (planned Phase 3, not needed for the core loop)
 - Direct LLM access to payment APIs
 
-## 11. Repository Structure
+## 12. Repository Structure
 
 ```
 recoverai/
-├── app/                    # FastAPI backend
-│   ├── main.py              # API endpoints
-│   ├── models.py             # SQLAlchemy models
-│   ├── recovery_engine.py    # Scoring + policy engine (core logic)
-│   ├── schemas.py            # Pydantic request/response schemas
-│   └── database.py           # DB connection (SQLite local / Postgres prod)
-├── frontend/                # React + Vite dashboard
+├── app/                       # FastAPI backend
+│   ├── main.py                  # API endpoints
+│   ├── models.py                # SQLAlchemy models
+│   ├── recovery_engine.py       # Scoring (ML + rule-based) + policy engine
+│   ├── razorpay_adapter.py      # Payment provider adapter (live sandbox / mock)
+│   ├── schemas.py               # Pydantic request/response schemas
+│   ├── database.py              # DB connection (SQLite local / Postgres prod)
+│   └── model.pkl                # Trained XGBoost model (generated by train_model.py)
+├── frontend/                  # React + Vite dashboard (5 screens)
 │   └── src/App.jsx
-├── generate_dataset.py      # Synthetic dataset generator (baseline + AI cohorts)
+├── generate_dataset.py        # Synthetic dataset generator (baseline + AI cohorts)
+├── train_model.py             # Trains/retrains the XGBoost model from live case outcomes
 ├── requirements.txt
 └── render.yaml
 ```
