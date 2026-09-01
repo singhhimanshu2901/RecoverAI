@@ -49,7 +49,7 @@ Payment Event → FastAPI Ingestion → Revenue-at-Risk Detector → Recovery Ca
 | Database | PostgreSQL (Neon, persistent) |
 | Recovery scoring | XGBoost model (one-hot features, cross-validated) with automatic rule-based fallback |
 | Policy engine | Deterministic — hard caps on retries, messages, cooldown, window |
-| Payment provider | Razorpay sandbox adapter — real test-mode API if credentials are set, transparent mock mode otherwise |
+| Payment provider | Real Razorpay test-mode API — live payment links + webhook-verified confirmation |
 | Frontend | React + Vite, deployed on Vercel — 5 screens (Overview, Recovery Queue, Analytics, Audit, System) |
 | Dataset | 500 synthetic recovery cases, AI cohort vs. baseline cohort |
 
@@ -72,7 +72,28 @@ before anything reaches a customer or a payment gateway. The `/model/status`
 endpoint (and the dashboard's **System** tab) always shows which scoring
 mode and payment-provider mode are currently active — nothing is hidden.
 
-## 5. Safety & Bounded Automation
+## 5. Real Payment Recovery (not simulated)
+
+The core loop is a genuine, working integration with Razorpay's test-mode
+API — this is not mocked for the live path:
+
+1. A payment-failed event creates a recovery case
+2. The AI scores it and recommends an action; the policy engine approves it
+3. If the action is `PAYMENT_LINK`, RecoverAI calls the real Razorpay API
+   and gets back a real, clickable payment link
+4. When a customer completes that payment (even a test-mode UPI/card
+   payment), Razorpay sends a real webhook to `/webhooks/razorpay`
+5. RecoverAI verifies the webhook signature, matches it to the case via the
+   payment link ID, and marks the case `RECOVERED` — with the outcome
+   coming from Razorpay itself, not a simulated random draw
+
+The bulk 500-case dataset (used for the batch metrics and baseline
+comparison) is generated synthetically since running 500 real test
+payments isn't practical — but the underlying mechanism (policy gate →
+real payment link → real webhook → recovery) is fully live and can be
+demonstrated end-to-end with a single real test-mode payment at any time.
+
+## 6. Safety & Bounded Automation
 
 - Max 2 retries per case, max 2 outreach messages, 6-hour cooldown between
   interventions, 72-hour maximum recovery window
@@ -82,10 +103,12 @@ mode and payment-provider mode are currently active — nothing is hidden.
 - If a payment outcome can't be verified, the case goes to
   `VERIFY_PENDING` and automation pauses — **RecoverAI never claims a
   recovery without a verified outcome**
+- Webhook signatures are verified against a shared secret before any case
+  is updated — unsigned or tampered webhook calls are rejected outright
 - Every action, decision, and policy check is written to an immutable
   audit trail (`GET /audit`)
 
-## 6. Recovery Attribution (proving the money was actually recovered)
+## 7. Recovery Attribution (proving the money was actually recovered)
 
 Every intervention gets a unique ID and timestamp. A payment is only
 counted as *agent-recovered* if it succeeds after the intervention within
@@ -97,10 +120,9 @@ the attribution window. We run two cohorts side by side:
 The dashboard reports both **gross recovery** and **incremental recovery**
 (AI cohort minus baseline) so the actual uplift from the agent is visible,
 not just total money moved. The **Analytics** tab breaks this down further
-by failure reason and by recommended action, so it's clear *which*
-interventions and *which* failure types drive the recovered revenue.
+by failure reason and by recommended action.
 
-## 7. Dashboard Screens
+## 8. Dashboard Screens
 
 | Screen | What it shows |
 |---|---|
@@ -108,110 +130,56 @@ interventions and *which* failure types drive the recovered revenue.
 | **Recovery Queue** | Filterable/searchable live case list with score, expected value, action, status |
 | **Analytics** | Revenue recovered by action taken, recovery rate by failure reason, case status distribution |
 | **Audit** | Full immutable event log across all cases (policy version, timestamps, outcomes) |
-| **System** | Which scoring engine (XGBoost vs. rule-based) and payment-provider mode (live sandbox vs. mock) are active right now, plus the hard-coded policy limits |
+| **System** | Which scoring engine (XGBoost vs. rule-based) and payment-provider mode are active right now, plus the hard-coded policy limits |
 
 Clicking any case in the Recovery Queue opens a detail view with the AI
 reasoning (score, expected value, recommended action) and that case's full
 audit trail.
 
-## 8. Demo Script (3–5 minutes)
+## 9. Demo Script (3–5 minutes)
 
-1. **Open the dashboard** (`recover-ai-2901.vercel.app`) — the pulse header
-   shows ₹13.6L already recovered of ₹28.1L at risk in this batch.
-2. **Point to the Overview tab** — recovery rate (67.4%), incremental
-   recovery vs. baseline (₹6.5L), and median time to recovery (3h 7m).
+1. **Open the dashboard** — the pulse header shows revenue already
+   recovered of total at risk in this batch.
+2. **Point to the Overview tab** — recovery rate, incremental recovery vs.
+   baseline, and median time to recovery.
 3. **Open the Recovery Queue tab** — show a live case: amount, recovery
    score, expected value, recommended action, status.
-4. **Click into one case** — walk through the AI reasoning panel (recovery
-   score, expected value, recommended action) and the full audit trail for
-   that case: created → analyzed → policy-approved → action executed →
-   verified → recovered.
-5. **Show the Baseline vs. RecoverAI chart** — this is the proof: the AI
-   cohort recovers meaningfully more than the naive baseline on the same
-   at-risk revenue.
-6. **Open the Analytics tab** — recovery rate broken down by failure
-   reason, and revenue recovered broken down by which action was taken.
-   This shows the system isn't a black box about *why* money came back.
-7. **Open the System tab** — shows exactly which scoring engine (XGBoost
-   model vs. rule-based fallback) and which payment-provider mode (live
-   Razorpay sandbox vs. mock) are active right now, plus the hard policy
-   limits. Full transparency, nothing hidden from the judges.
-8. **Open `/docs` (FastAPI Swagger)** — show the actual API: `POST
-   /events/payment-failed`, `POST /recovery/analyze`, `POST
-   /recovery/execute`, `POST /recovery/verify`. This is a real, callable
-   backend, not a mockup.
-9. **Close on the Audit tab** — every decision is logged with a policy
-   version, timestamp, and outcome. Nothing is a black box.
+4. **Live real-payment moment**: trigger a fresh payment-failed case via
+   `/docs`, let it get scored and approved, open the real Razorpay payment
+   link it generates, and pay it (UPI test ID `success@razorpay`). Refresh
+   the case in the dashboard — it flips to `RECOVERED` in real time, driven
+   by Razorpay's actual webhook, not a simulated outcome.
+5. **Show the Baseline vs. RecoverAI chart** — the AI cohort recovers
+   meaningfully more than the naive baseline on the same at-risk revenue.
+6. **Open the Analytics tab** — recovery rate by failure reason, and
+   revenue recovered by which action was taken.
+7. **Open the System tab** — shows exactly which scoring engine and
+   payment-provider mode are active, plus the hard policy limits.
+8. **Close on the Audit tab** — every decision is logged with a policy
+   version, timestamp, and outcome.
 
-## 9. One-Minute Pitch
+## 10. One-Minute Pitch
 
 > RecoverAI is an AI revenue-recovery agent for merchants. When a payment
 > fails, it doesn't just raise an alert — it diagnoses the failure,
 > estimates whether the money is recoverable, decides the next best
 > action, executes it within strict merchant-defined limits, verifies the
-> outcome, and stops when recovery succeeds or human review is needed. We
-> measure results across a batch: revenue at risk, actual money recovered,
-> recovery rate, and incremental recovery over a naive baseline. Every
-> action is explainable, bounded, and auditable — right now, live, it has
-> recovered ₹13.6L of ₹28.1L at risk across 500 sandbox cases, a 67.4%
-> recovery rate.
+> outcome via a real Razorpay webhook, and stops when recovery succeeds or
+> human review is needed. We measure results across a batch: revenue at
+> risk, actual money recovered, recovery rate, and incremental recovery
+> over a naive baseline. Every action is explainable, bounded, and
+> auditable — and the recovery loop itself is a real, working integration
+> with Razorpay, not a mockup.
 
-## 10. Anticipated Judge Questions
-
-**How do you prove the agent recovered the money?**
-Each intervention has a unique ID and timestamp; we verify the payment
-status afterward and compare against a baseline/no-intervention cohort to
-isolate incremental impact.
-
-**Why AI instead of a retry script?**
-The AI diagnoses failures, scores recoverability, prioritizes by expected
-value, and picks among approved interventions — the policy engine, not the
-AI, controls execution.
-
-**Can the agent retry forever or spam customers?**
-No — retry count, message count, cooldown, and recovery-window limits are
-hard-coded, deterministic constraints enforced by the policy gate, not
-suggestions to the model.
-
-**What happens if payment status can't be verified?**
-The case moves to `VERIFY_PENDING`, automation pauses, and it's queued for
-human verification. The system never reports a recovery without evidence.
-
-**How good is the ML model, really?**
-Trained via 5-fold cross-validation on the current synthetic batch (~500
-cases, ~190 with a resolved outcome). On a dataset this size the model
-gives a modest but real lift over chance. We report cross-validated AUC
-rather than a single train/test split because a single split on ~190 rows
-is too noisy to trust on its own. If the model errors or underperforms,
-`calculate_recovery_score()` automatically falls back to the transparent
-rule-based scorer — the system is designed to never depend on the ML model
-working. More historical data in production would directly improve it;
-the training/serving code is already structured for that (`train_model.py`
-retrains from live case outcomes with one command).
-
-**Is this production-ready?**
-This prototype runs on sandbox/synthetic data end-to-end (FastAPI backend,
-persistent Postgres, live React dashboard). Production would add real
-Razorpay live-mode integration (the adapter already supports real sandbox
-credentials via env vars — it's a config change, not a rewrite), merchant
-auth, and larger-scale validation.
-
-## 11. What's Deliberately Out of Scope (v1)
-
-- Real-money transactions (sandbox/synthetic only)
-- Unlimited retries or messaging
-- Hinglish voice recovery (planned Phase 3, not needed for the core loop)
-- Direct LLM access to payment APIs
-
-## 12. Repository Structure
+## 11. Repository Structure
 
 ```
 recoverai/
 ├── app/                       # FastAPI backend
-│   ├── main.py                  # API endpoints
+│   ├── main.py                  # API endpoints + Razorpay webhook handler
 │   ├── models.py                # SQLAlchemy models
 │   ├── recovery_engine.py       # Scoring (ML + rule-based) + policy engine
-│   ├── razorpay_adapter.py      # Payment provider adapter (live sandbox / mock)
+│   ├── razorpay_adapter.py      # Payment provider adapter + webhook verification
 │   ├── schemas.py               # Pydantic request/response schemas
 │   ├── database.py              # DB connection (SQLite local / Postgres prod)
 │   └── model.pkl                # Trained XGBoost model (generated by train_model.py)
