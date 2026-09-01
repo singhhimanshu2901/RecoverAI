@@ -520,6 +520,149 @@ function SystemScreen() {
   );
 }
 
+async function apiPost(path, body) {
+  const res = await fetch(API + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error("Request failed: " + path);
+  return res.json();
+}
+
+function LiveDemoModal({ onClose, onDone }) {
+  const [stage, setStage] = useState("running"); // running | link_ready | polling | recovered | error
+  const [caseId, setCaseId] = useState(null);
+  const [link, setLink] = useState(null);
+  const [errMsg, setErrMsg] = useState("");
+  const pollRef = React.useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      try {
+        const suffix = Date.now().toString().slice(-6);
+        const created = await apiPost("/events/payment-failed", {
+          payment_id: `pay_live_demo_${suffix}`,
+          customer_id: `C_DEMO_${suffix}`,
+          amount: 499,
+          failure_code: "CUSTOMER_ACTION_REQUIRED",
+          previous_success_count: 10,
+          previous_failure_count: 1,
+          subscription_age_days: 200,
+        });
+        if (cancelled) return;
+        setCaseId(created.id);
+
+        await apiPost(`/recovery/analyze?case_id=${created.id}`);
+        if (cancelled) return;
+
+        const executed = await apiPost("/recovery/execute", { case_id: created.id });
+        if (cancelled) return;
+
+        const detail = await apiGet(`/recovery/cases/${created.id}`);
+        const lastExec = [...detail.audit_trail].reverse().find((a) => a.event_type === "ACTION_EXECUTED");
+        const url = lastExec?.payload?.provider_result?.short_url;
+
+        if (!url) {
+          setErrMsg("No payment link was generated — case may have been escalated or stopped by policy. Try again.");
+          setStage("error");
+          return;
+        }
+        setLink(url);
+        setStage("link_ready");
+      } catch (e) {
+        setErrMsg(e.message);
+        setStage("error");
+      }
+    }
+    run();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (stage !== "polling" && stage !== "link_ready") return;
+    pollRef.current = setInterval(async () => {
+      if (!caseId) return;
+      try {
+        const detail = await apiGet(`/recovery/cases/${caseId}`);
+        if (detail.case.status === "RECOVERED") {
+          setStage("recovered");
+          clearInterval(pollRef.current);
+          onDone();
+        }
+      } catch { /* ignore transient errors while polling */ }
+    }, 3000);
+    return () => clearInterval(pollRef.current);
+  }, [stage, caseId, onDone]);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex",
+      alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20,
+    }}>
+      <div style={{
+        background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14,
+        padding: 28, maxWidth: 440, width: "100%", textAlign: "center",
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Live Recovery Demo</div>
+        <div style={{ fontSize: 12, color: MUTED, marginBottom: 22 }}>Real Razorpay test-mode payment, ₹499</div>
+
+        {stage === "running" && (
+          <div style={{ padding: "20px 0" }}>
+            <RefreshCw size={22} color={BLUE} className="spin" />
+            <div style={{ fontSize: 13, color: MUTED, marginTop: 12 }}>
+              Creating case → scoring → policy check → generating payment link…
+            </div>
+          </div>
+        )}
+
+        {(stage === "link_ready" || stage === "polling") && (
+          <div>
+            <div style={{ fontSize: 12.5, color: MUTED, marginBottom: 16, lineHeight: 1.6 }}>
+              Payment link generated and approved by the policy engine. Open it,
+              pay with UPI ID <b style={{ color: TEXT }}>success@razorpay</b>, and this
+              screen updates automatically when Razorpay's webhook confirms it.
+            </div>
+            <a href={link} target="_blank" rel="noreferrer" style={{
+              display: "block", background: EMERALD, color: INK, fontWeight: 700,
+              padding: "12px 20px", borderRadius: 8, textDecoration: "none", fontSize: 14, marginBottom: 14,
+            }}>
+              Open Payment Link →
+            </a>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: AMBER, fontSize: 12 }}>
+              <PauseCircle size={13} /> Waiting for real webhook confirmation…
+            </div>
+          </div>
+        )}
+
+        {stage === "recovered" && (
+          <div style={{ padding: "10px 0" }}>
+            <CheckCircle2 size={32} color={EMERALD} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: EMERALD, marginTop: 10 }}>Recovered — ₹499</div>
+            <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>Confirmed live by Razorpay's webhook.</div>
+          </div>
+        )}
+
+        {stage === "error" && (
+          <div style={{ padding: "10px 0" }}>
+            <AlertTriangle size={26} color={RED} />
+            <div style={{ fontSize: 13, color: RED, marginTop: 10 }}>{errMsg}</div>
+          </div>
+        )}
+
+        <button onClick={onClose} style={{
+          marginTop: 20, background: "transparent", border: `1px solid ${BORDER}`, color: MUTED,
+          borderRadius: 8, padding: "8px 16px", fontSize: 12.5, cursor: "pointer",
+        }}>
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("overview");
   const [metrics, setMetrics] = useState(null);
@@ -527,6 +670,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [selectedCase, setSelectedCase] = useState(null);
   const [error, setError] = useState(null);
+  const [showDemo, setShowDemo] = useState(false);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -557,13 +701,26 @@ export default function App() {
               sandbox
             </span>
           </div>
-          <button onClick={refresh} style={{
-            background: SURFACE, border: `1px solid ${BORDER}`, color: MUTED, borderRadius: 8,
-            padding: "6px 12px", fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
-          }}>
-            <RefreshCw size={12} className={loading ? "spin" : ""} /> Refresh
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowDemo(true)} style={{
+              background: EMERALD, border: "none", color: INK, borderRadius: 8,
+              padding: "6px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <Zap size={13} /> Live Demo Payment
+            </button>
+            <button onClick={refresh} style={{
+              background: SURFACE, border: `1px solid ${BORDER}`, color: MUTED, borderRadius: 8,
+              padding: "6px 12px", fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <RefreshCw size={12} className={loading ? "spin" : ""} /> Refresh
+            </button>
+          </div>
         </div>
+
+        {showDemo && (
+          <LiveDemoModal onClose={() => setShowDemo(false)} onDone={refresh} />
+        )}
 
         {error && (
           <div style={{
