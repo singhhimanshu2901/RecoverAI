@@ -134,7 +134,82 @@ function PulseHeader({ metrics, loading }) {
   );
 }
 
-function OverviewScreen({ metrics }) {
+function RecoveryFunnel({ cases }) {
+  const total = cases.length;
+  const analyzed = cases.filter((c) => c.recovery_score !== null).length;
+  const actioned = cases.filter((c) => c.attempt_number >= 1).length;
+  const recovered = cases.filter((c) => c.recovered).length;
+
+  const stages = [
+    { label: "Cases created", value: total, color: MUTED },
+    { label: "Diagnosed & scored", value: analyzed, color: BLUE },
+    { label: "Action executed", value: actioned, color: AMBER },
+    { label: "Recovered", value: recovered, color: EMERALD },
+  ];
+  const max = total || 1;
+
+  return (
+    <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>Recovery funnel (this batch)</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {stages.map((s, i) => (
+          <div key={i}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+              <span>{s.label}</span>
+              <span style={{ fontFamily: MONO, color: MUTED }}>{s.value}</span>
+            </div>
+            <div style={{ height: 8, background: SURFACE_2, borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: (s.value / max * 100) + "%", background: s.color, borderRadius: 4, transition: "width 0.5s ease" }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ActivityTicker() {
+  const [events, setEvents] = useState([]);
+
+  useEffect(() => {
+    const load = () => apiGet("/audit?limit=6").then(setEvents).catch(() => {});
+    load();
+    const interval = setInterval(load, 8000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const ICONS = {
+    CASE_CREATED: Activity, ANALYZED: Zap, ACTION_EXECUTED: RefreshCw,
+    RECOVERED: CheckCircle2, RECOVERED_VIA_WEBHOOK: CheckCircle2,
+    VERIFY_PENDING: PauseCircle, HUMAN_REVIEW: ShieldAlert, BATCH_GENERATED: BarChart3,
+  };
+
+  return (
+    <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: EMERALD, display: "inline-block" }} />
+        <span style={{ fontSize: 13, color: MUTED }}>Live activity</span>
+      </div>
+      {events.length === 0 && <div style={{ fontSize: 12, color: MUTED }}>No recent activity.</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {events.map((e, i) => {
+          const Icon = ICONS[e.event_type] || Activity;
+          return (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <Icon size={12} color={MUTED} style={{ flexShrink: 0 }} />
+              <span style={{ flex: 1, color: TEXT, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {e.event_type.replaceAll("_", " ").toLowerCase()}
+              </span>
+              <span style={{ fontFamily: MONO, color: MUTED, fontSize: 10.5, flexShrink: 0 }}>{timeAgo(e.timestamp)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function OverviewScreen({ metrics, cases }) {
   if (!metrics) return null;
   const cohortData = [
     { name: "Baseline", value: metrics.baseline_recovered },
@@ -156,7 +231,7 @@ function OverviewScreen({ metrics }) {
         <MetricCard label="Open cases" value={metrics.open_cases} icon={Activity} accent={AMBER} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14, marginBottom: 14 }}>
         <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
           <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>Baseline vs RecoverAI — revenue recovered</div>
           <ResponsiveContainer width="100%" height={220}>
@@ -190,13 +265,19 @@ function OverviewScreen({ metrics }) {
           </div>
         </div>
       </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <RecoveryFunnel cases={cases} />
+        <ActivityTicker />
+      </div>
     </div>
   );
 }
 
-function CaseQueue({ cases, onSelect, loading }) {
+function CaseQueue({ cases, onSelect, loading, onRefresh }) {
   const [filter, setFilter] = useState("ALL");
   const [q, setQ] = useState("");
+  const [reviewing, setReviewing] = useState(null);
   const statuses = ["ALL", "OPEN", "ACTION_TAKEN", "RECOVERED", "ESCALATED", "VERIFY_PENDING", "STOPPED"];
 
   const filtered = cases.filter((c) => {
@@ -204,6 +285,17 @@ function CaseQueue({ cases, onSelect, loading }) {
     if (q && !c.customer_id.toLowerCase().includes(q.toLowerCase()) && !c.payment_id.toLowerCase().includes(q.toLowerCase())) return false;
     return true;
   });
+
+  const handleReview = async (e, caseId, approved) => {
+    e.stopPropagation();
+    setReviewing(caseId);
+    try {
+      await apiPost(`/review/${caseId}`, { approved, action_override: approved ? "PAYMENT_LINK" : null });
+      onRefresh();
+    } finally {
+      setReviewing(null);
+    }
+  };
 
   return (
     <div>
@@ -230,7 +322,7 @@ function CaseQueue({ cases, onSelect, loading }) {
 
       <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, overflow: "hidden" }}>
         <div style={{
-          display: "grid", gridTemplateColumns: "1fr 0.9fr 0.9fr 0.9fr 1fr 1.1fr 0.7fr 24px",
+          display: "grid", gridTemplateColumns: "1fr 0.9fr 0.9fr 0.9fr 1fr 1.1fr 0.7fr 130px",
           padding: "10px 16px", fontSize: 11, color: MUTED, textTransform: "uppercase",
           letterSpacing: 0.3, borderBottom: `1px solid ${BORDER}`,
         }}>
@@ -243,7 +335,7 @@ function CaseQueue({ cases, onSelect, loading }) {
         )}
         {filtered.slice(0, 60).map((c) => (
           <div key={c.id} onClick={() => onSelect(c.id)} style={{
-            display: "grid", gridTemplateColumns: "1fr 0.9fr 0.9fr 0.9fr 1fr 1.1fr 0.7fr 24px",
+            display: "grid", gridTemplateColumns: "1fr 0.9fr 0.9fr 0.9fr 1fr 1.1fr 0.7fr 130px",
             padding: "11px 16px", fontSize: 13, borderBottom: `1px solid ${BORDER}`,
             cursor: "pointer", alignItems: "center", transition: "background 0.1s",
           }}
@@ -258,12 +350,38 @@ function CaseQueue({ cases, onSelect, loading }) {
             <span style={{ fontSize: 12, color: BLUE }}>{c.recommended_action || "—"}</span>
             <span><StatusBadge status={c.status} /></span>
             <span style={{ fontSize: 11.5, color: MUTED }}>{timeAgo(c.created_at)}</span>
+            {c.status === "ESCALATED" ? (
+              <span style={{ display: "flex", gap: 5 }} onClick={(e) => e.stopPropagation()}>
+                <button onClick={(e) => handleReview(e, c.id, true)} disabled={reviewing === c.id} title="Approve"
+                  style={{ background: "rgba(52,211,153,0.15)", border: "none", color: EMERALD, borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 11 }}>
+                  ✓
+                </button>
+                <button onClick={(e) => handleReview(e, c.id, false)} disabled={reviewing === c.id} title="Reject"
+                  style={{ background: "rgba(248,113,113,0.15)", border: "none", color: RED, borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 11 }}>
+                  ✕
+                </button>
+              </span>
+            ) : <span />}
             <ChevronRight size={14} color={MUTED} />
           </div>
         ))}
       </div>
     </div>
   );
+}
+
+function buildRecoveryMessage(c) {
+  const amt = Math.round(c.amount).toLocaleString("en-IN");
+  if (c.recommended_action === "PAYMENT_LINK") {
+    return `Hi! Aapka ₹${amt} ka payment complete nahi ho paya. Aap secure payment link se ise turant complete kar sakte hain. Agar aapne already pay kar diya hai, please is message ko ignore karein.`;
+  }
+  if (c.recommended_action === "REMINDER") {
+    return `Hi! Bas ek chhota reminder — aapka ₹${amt} ka payment abhi pending hai. Jab bhi convenient ho, complete kar lijiyega.`;
+  }
+  if (c.recommended_action === "RETRY") {
+    return `Aapka ₹${amt} ka payment automatically dobara try kiya ja raha hai. Kisi action ki zaroorat nahi hai.`;
+  }
+  return null;
 }
 
 function CaseDetail({ caseId, onBack }) {
@@ -275,6 +393,7 @@ function CaseDetail({ caseId, onBack }) {
 
   if (!detail) return <div style={{ padding: 24, color: MUTED, fontSize: 13 }}>Loading case…</div>;
   const c = detail.case;
+  const message = buildRecoveryMessage(c);
 
   return (
     <div>
@@ -328,6 +447,18 @@ function CaseDetail({ caseId, onBack }) {
           </div>
         </div>
       </div>
+
+      {message && (
+        <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: MUTED, marginBottom: 10 }}>Customer message preview (Hinglish, policy-approved template)</div>
+          <div style={{
+            background: SURFACE_2, borderRadius: 10, padding: "12px 14px", fontSize: 13,
+            lineHeight: 1.6, color: TEXT, maxWidth: 480,
+          }}>
+            {message}
+          </div>
+        </div>
+      )}
 
       <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
         <div style={{ fontSize: 12, color: MUTED, marginBottom: 12 }}>Audit trail</div>
@@ -466,12 +597,31 @@ function AnalyticsScreen() {
   );
 }
 
-function SystemScreen() {
+function SystemScreen({ onBatchGenerated }) {
   const [status, setStatus] = useState(null);
+  const [batchN, setBatchN] = useState("200");
+  const [generating, setGenerating] = useState(false);
+  const [batchResult, setBatchResult] = useState(null);
 
   useEffect(() => {
     apiGet("/model/status").then(setStatus).catch(() => setStatus(null));
   }, []);
+
+  const runBatch = async () => {
+    const n = parseInt(batchN, 10);
+    if (isNaN(n) || n < 1 || n > 1000) return;
+    setGenerating(true);
+    setBatchResult(null);
+    try {
+      const res = await apiPost(`/admin/generate-batch?n=${n}&baseline_ratio=0.3`);
+      setBatchResult(res);
+      onBatchGenerated();
+    } catch (e) {
+      setBatchResult({ error: e.message });
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   if (!status) return <div style={{ padding: 24, textAlign: "center", color: MUTED, fontSize: 13 }}>Loading system status…</div>;
 
@@ -515,6 +665,41 @@ function SystemScreen() {
           <div><span style={{ color: MUTED }}>Cooldown</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>6h</span></div>
           <div><span style={{ color: MUTED }}>Max recovery window</span><br /><span style={{ fontFamily: MONO, fontSize: 16 }}>72h</span></div>
         </div>
+      </div>
+
+      <div style={{ gridColumn: "1 / -1", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+        <div style={{ fontSize: 13, color: MUTED, marginBottom: 10 }}>Generate a fresh synthetic batch</div>
+        <div style={{ fontSize: 12, color: MUTED, marginBottom: 14, lineHeight: 1.6 }}>
+          Runs entirely in-process (no external script, no HTTP round trips) — each case is created,
+          scored, policy-checked, and outcome-simulated directly against the database. A few hundred
+          cases typically complete in under 10 seconds.
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <input
+            type="number" min="1" max="1000" value={batchN}
+            onChange={(e) => setBatchN(e.target.value)}
+            style={{
+              width: 100, background: SURFACE_2, border: `1px solid ${BORDER}`, borderRadius: 8,
+              padding: "8px 10px", color: TEXT, fontFamily: MONO, fontSize: 13, outline: "none",
+            }}
+          />
+          <button onClick={runBatch} disabled={generating} style={{
+            background: generating ? SURFACE_2 : EMERALD, border: "none", color: generating ? MUTED : INK,
+            fontWeight: 700, borderRadius: 8, padding: "8px 16px", fontSize: 12.5,
+            cursor: generating ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 6,
+          }}>
+            {generating ? <RefreshCw size={13} className="spin" /> : <Zap size={13} />}
+            {generating ? "Generating…" : "Generate Batch"}
+          </button>
+        </div>
+        {batchResult && !batchResult.error && (
+          <div style={{ marginTop: 12, fontSize: 12.5, color: EMERALD, fontFamily: MONO }}>
+            Generated {batchResult.generated} cases ({batchResult.ai_cohort} AI, {batchResult.baseline_cohort} baseline) — {batchResult.recovered} recovered.
+          </div>
+        )}
+        {batchResult?.error && (
+          <div style={{ marginTop: 12, fontSize: 12.5, color: RED }}>{batchResult.error}</div>
+        )}
       </div>
     </div>
   );
@@ -822,11 +1007,11 @@ export default function App() {
           <CaseDetail caseId={selectedCase} onBack={() => setSelectedCase(null)} />
         ) : (
           <>
-            {tab === "overview" && <OverviewScreen metrics={metrics} />}
-            {tab === "queue" && <CaseQueue cases={cases} onSelect={setSelectedCase} loading={loading} />}
+            {tab === "overview" && <OverviewScreen metrics={metrics} cases={cases} />}
+            {tab === "queue" && <CaseQueue cases={cases} onSelect={setSelectedCase} loading={loading} onRefresh={refresh} />}
             {tab === "analytics" && <AnalyticsScreen />}
             {tab === "audit" && <AuditScreen />}
-            {tab === "system" && <SystemScreen />}
+            {tab === "system" && <SystemScreen onBatchGenerated={refresh} />}
           </>
         )}
       </div>

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from .database import engine, get_db
-from . import models, schemas, recovery_engine as re, razorpay_adapter
+from . import models, schemas, recovery_engine as re, razorpay_adapter, simulator
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -237,6 +237,7 @@ def verify_payment(req: schemas.VerifyPaymentRequest, db: Session = Depends(get_
     db.refresh(case)
     return case
 
+
 # ---------------- 6. Razorpay webhook (real payment confirmations) ----------------
 @app.post("/webhooks/razorpay")
 async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
@@ -286,7 +287,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     })
     return {"status": "recovered", "case_id": case.id}
 
-# ---------------- 6. Human review override ----------------
+
+# ---------------- 7. Human review override ----------------
 @app.post("/review/{case_id}", response_model=schemas.CaseOut)
 def human_review(case_id: str, req: schemas.ReviewRequest, db: Session = Depends(get_db)):
     case = db.query(models.RecoveryCase).filter(models.RecoveryCase.id == case_id).first()
@@ -306,7 +308,7 @@ def human_review(case_id: str, req: schemas.ReviewRequest, db: Session = Depends
     return case
 
 
-# ---------------- 7. Recovery queue ----------------
+# ---------------- 7b. Recovery queue ----------------
 @app.get("/recovery/cases", response_model=list[schemas.CaseOut])
 def list_cases(status: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)):
     q = db.query(models.RecoveryCase)
@@ -383,7 +385,16 @@ def reset_data(db: Session = Depends(get_db)):
     db.commit()
     return {"status": "reset_complete"}
 
-# ---------------- 11. Analytics breakdowns ----------------
+
+# ---------------- 9b. Admin: generate a fresh synthetic batch (in-process, fast) ----------------
+@app.post("/admin/generate-batch")
+def generate_batch(n: int = 200, baseline_ratio: float = 0.3, db: Session = Depends(get_db)):
+    result = simulator.generate_batch(db, n=n, baseline_ratio=baseline_ratio)
+    log_audit(db, None, "BATCH_GENERATED", result)
+    return result
+
+
+# ---------------- 10. Analytics breakdowns ----------------
 @app.get("/recovery/analytics")
 def get_analytics(db: Session = Depends(get_db)):
     all_cases = db.query(models.RecoveryCase).all()
@@ -420,7 +431,8 @@ def get_analytics(db: Session = Depends(get_db)):
         "by_status": by_status,
     }
 
-# ---------------- 10. Audit log ----------------
+
+# ---------------- 11. Audit log ----------------
 @app.get("/audit")
 def get_audit(case_id: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)):
     q = db.query(models.AuditEvent)
