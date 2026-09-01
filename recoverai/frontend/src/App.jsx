@@ -530,7 +530,62 @@ async function apiPost(path, body) {
   return res.json();
 }
 
-function LiveDemoModal({ onClose, onDone }) {
+function AmountPromptModal({ onCancel, onConfirm }) {
+  const [value, setValue] = useState("499");
+  const num = parseFloat(value);
+  const valid = !isNaN(num) && num > 0 && num <= 100000;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex",
+      alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20,
+    }}>
+      <div style={{
+        background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14,
+        padding: 28, maxWidth: 360, width: "100%",
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Live Recovery Demo</div>
+        <div style={{ fontSize: 12, color: MUTED, marginBottom: 18 }}>
+          Enter the amount for this real Razorpay test-mode payment link.
+        </div>
+        <div style={{ position: "relative", marginBottom: 6 }}>
+          <span style={{ position: "absolute", left: 12, top: 11, color: MUTED, fontSize: 15, fontFamily: MONO }}>₹</span>
+          <input
+            type="number" min="1" max="100000" value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+            style={{
+              width: "100%", background: SURFACE_2, border: `1px solid ${BORDER}`, borderRadius: 8,
+              padding: "10px 12px 10px 26px", color: TEXT, fontSize: 16, fontFamily: MONO, outline: "none",
+            }}
+          />
+        </div>
+        {!valid && <div style={{ fontSize: 11.5, color: RED, marginBottom: 8 }}>Enter an amount between ₹1 and ₹1,00,000.</div>}
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <button onClick={onCancel} style={{
+            flex: 1, background: "transparent", border: `1px solid ${BORDER}`, color: MUTED,
+            borderRadius: 8, padding: "9px 0", fontSize: 12.5, cursor: "pointer",
+          }}>
+            Cancel
+          </button>
+          <button
+            disabled={!valid}
+            onClick={() => onConfirm(num)}
+            style={{
+              flex: 1, background: valid ? EMERALD : SURFACE_2, border: "none",
+              color: valid ? INK : MUTED, fontWeight: 700, borderRadius: 8,
+              padding: "9px 0", fontSize: 12.5, cursor: valid ? "pointer" : "not-allowed",
+            }}
+          >
+            Generate Link
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveDemoModal({ amount, onClose, onDone }) {
   const [stage, setStage] = useState("running"); // running | link_ready | polling | recovered | error
   const [caseId, setCaseId] = useState(null);
   const [link, setLink] = useState(null);
@@ -546,7 +601,7 @@ function LiveDemoModal({ onClose, onDone }) {
         const created = await apiPost("/events/payment-failed", {
           payment_id: `pay_live_demo_${suffix}`,
           customer_id: `C_DEMO_${suffix}`,
-          amount: 499,
+          amount: amount,
           failure_code: "CUSTOMER_ACTION_REQUIRED",
           previous_success_count: 10,
           previous_failure_count: 1,
@@ -607,7 +662,7 @@ function LiveDemoModal({ onClose, onDone }) {
         padding: 28, maxWidth: 440, width: "100%", textAlign: "center",
       }}>
         <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Live Recovery Demo</div>
-        <div style={{ fontSize: 12, color: MUTED, marginBottom: 22 }}>Real Razorpay test-mode payment, ₹499</div>
+        <div style={{ fontSize: 12, color: MUTED, marginBottom: 22 }}>Real Razorpay test-mode payment, {fmtINR(amount)}</div>
 
         {stage === "running" && (
           <div style={{ padding: "20px 0" }}>
@@ -640,7 +695,7 @@ function LiveDemoModal({ onClose, onDone }) {
         {stage === "recovered" && (
           <div style={{ padding: "10px 0" }}>
             <CheckCircle2 size={32} color={EMERALD} />
-            <div style={{ fontSize: 16, fontWeight: 700, color: EMERALD, marginTop: 10 }}>Recovered — ₹499</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: EMERALD, marginTop: 10 }}>Recovered — {fmtINR(amount)}</div>
             <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>Confirmed live by Razorpay's webhook.</div>
           </div>
         )}
@@ -671,6 +726,7 @@ export default function App() {
   const [selectedCase, setSelectedCase] = useState(null);
   const [error, setError] = useState(null);
   const [showDemo, setShowDemo] = useState(false);
+  const [demoAmount, setDemoAmount] = useState(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -718,8 +774,18 @@ export default function App() {
           </div>
         </div>
 
-        {showDemo && (
-          <LiveDemoModal onClose={() => setShowDemo(false)} onDone={refresh} />
+        {showDemo && !demoAmount && (
+          <AmountPromptModal
+            onCancel={() => setShowDemo(false)}
+            onConfirm={(amt) => setDemoAmount(amt)}
+          />
+        )}
+        {showDemo && demoAmount && (
+          <LiveDemoModal
+            amount={demoAmount}
+            onClose={() => { setShowDemo(false); setDemoAmount(null); }}
+            onDone={refresh}
+          />
         )}
 
         {error && (
