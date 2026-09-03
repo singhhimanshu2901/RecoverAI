@@ -274,6 +274,24 @@ function OverviewScreen({ metrics, cases }) {
   );
 }
 
+function downloadCasesCSV(cases) {
+  const headers = ["id", "customer_id", "payment_id", "amount", "status", "priority",
+    "failure_code", "recovery_score", "expected_value", "recommended_action",
+    "recovered", "recovered_amount", "created_at"];
+  const rows = cases.map((c) => headers.map((h) => {
+    const v = c[h];
+    return typeof v === "string" && v.includes(",") ? `"${v}"` : v;
+  }).join(","));
+  const csv = [headers.join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `recoverai-cases-${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function CaseQueue({ cases, onSelect, loading, onRefresh }) {
   const [filter, setFilter] = useState("ALL");
   const [q, setQ] = useState("");
@@ -318,6 +336,13 @@ function CaseQueue({ cases, onSelect, loading, onRefresh }) {
             {s === "ALL" ? "All" : (STATUS_STYLE[s]?.label || s)}
           </button>
         ))}
+        <button onClick={() => downloadCasesCSV(filtered)} style={{
+          marginLeft: "auto", background: "transparent", border: `1px solid ${BORDER}`, color: MUTED,
+          borderRadius: 8, padding: "6px 12px", fontSize: 11.5, cursor: "pointer",
+          display: "flex", alignItems: "center", gap: 6,
+        }}>
+          <ScrollText size={12} /> Export CSV
+        </button>
       </div>
 
       <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, overflow: "hidden" }}>
@@ -591,6 +616,62 @@ function AnalyticsScreen() {
               </div>
             );
           })}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 12 }}>Recovery rate by customer segment</div>
+          {Object.entries(data.by_customer_segment || {})
+            .sort((a, b) => b[1].recovery_rate - a[1].recovery_rate)
+            .map(([seg, v]) => (
+              <div key={seg} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 5 }}>
+                  <span>{seg}</span>
+                  <span style={{ fontFamily: MONO, color: MUTED }}>{v.recovered}/{v.total} · {fmtPct(v.recovery_rate)}</span>
+                </div>
+                <div style={{ height: 5, background: SURFACE_2, borderRadius: 3, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: (v.recovery_rate * 100) + "%", background: BLUE, borderRadius: 3 }} />
+                </div>
+              </div>
+            ))}
+        </div>
+
+        <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 18 }}>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 12 }}>Statistical significance: AI vs. baseline</div>
+          {data.statistical_significance ? (
+            <div>
+              <div style={{ display: "flex", gap: 24, marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 3 }}>Baseline rate</div>
+                  <div style={{ fontFamily: MONO, fontSize: 18, color: MUTED }}>{fmtPct(data.statistical_significance.baseline_rate)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 3 }}>AI rate</div>
+                  <div style={{ fontFamily: MONO, fontSize: 18, color: EMERALD }}>{fmtPct(data.statistical_significance.ai_rate)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 3 }}>p-value</div>
+                  <div style={{ fontFamily: MONO, fontSize: 18 }}>{data.statistical_significance.p_value}</div>
+                </div>
+              </div>
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 20,
+                background: data.statistical_significance.significant_at_95 ? "rgba(52,211,153,0.12)" : "rgba(251,191,36,0.12)",
+                color: data.statistical_significance.significant_at_95 ? EMERALD : AMBER, fontSize: 12, fontWeight: 600,
+              }}>
+                {data.statistical_significance.significant_at_95
+                  ? "Statistically significant (p < 0.05)"
+                  : "Not statistically significant"}
+              </div>
+              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 10, lineHeight: 1.6 }}>
+                Two-proportion z-test comparing recovery rates across cohorts — this checks whether
+                the gap is a real effect of the AI pipeline, not just random variation in this batch.
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: MUTED }}>Not enough data in both cohorts yet.</div>
+          )}
         </div>
       </div>
     </div>

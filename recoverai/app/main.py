@@ -1,5 +1,6 @@
 import uuid
 import json
+import math
 from datetime import datetime
 from typing import Optional
 
@@ -41,6 +42,45 @@ def log_audit(db: Session, case_id: str, event_type: str, payload: dict):
 def root():
     return {"service": "RecoverAI", "status": "running"}
 
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    """Lightweight liveness + DB connectivity check for uptime monitoring."""
+    try:
+        db.query(models.RecoveryCase).limit(1).all()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "database": "connected" if db_ok else "unreachable",
+        "scoring_mode": "xgboost_ml_model" if re._load_model() is not None else "rule_based",
+        "payment_provider_mode": "live_sandbox" if razorpay_adapter.is_live_mode() else "mock",
+    }
+
+
+def _two_proportion_z_test(recovered_a, total_a, recovered_b, total_b):
+    """
+    Two-proportion z-test (normal approximation, no scipy dependency) --
+    tests whether the AI cohort's recovery rate is significantly different
+    from the baseline cohort's, rather than just eyeballing two percentages.
+    """
+    if total_a == 0 or total_b == 0:
+        return None
+    p_a = recovered_a / total_a
+    p_b = recovered_b / total_b
+    p_pool = (recovered_a + recovered_b) / (total_a + total_b)
+    se = math.sqrt(p_pool * (1 - p_pool) * (1 / total_a + 1 / total_b))
+    if se == 0:
+        return None
+    z = (p_a - p_b) / se
+    p_value = math.erfc(abs(z) / math.sqrt(2))
+    return {
+        "baseline_rate": round(p_b, 4),
+        "ai_rate": round(p_a, 4),
+        "z_statistic": round(z, 3),
+        "p_value": round(p_value, 5),
+        "significant_at_95": p_value < 0.05,
+    }
 
 @app.get("/model/status")
 def model_status():
@@ -420,6 +460,36 @@ def get_analytics(db: Session = Depends(get_db)):
     by_status = {}
     for c in all_cases:
         by_status[c.status] = by_status.get(c.status, 0) + 1
+        
+        # Statistical significance: is the AI cohort's recovery rate genuinely
+    # different from baseline, or could the gap be due to chance?
+    ai_cases = [c for c in all_cases if not c.is_baseline_cohort]
+    baseline_cases = [c for c in all_cases if c.is_baseline_cohort]
+    sig_test = _two_proportion_z_test(
+        sum(1 for c in ai_cases if c.recovered), len(ai_cases),
+        sum(1 for c in baseline_cases if c.recovered), len(baseline_cases),
+    )
+
+    # Customer segmentation by loyalty (based on prior payment history)
+    def segment(c):
+        total = c.previous_success_count + c.previous_failure_count
+        if total == 0:
+            return "New customer"
+        ratio = c.previous_success_count / total
+        if ratio >= 0.8 and c.previous_success_count >= 5:
+            return "Loyal"
+        if ratio < 0.4:
+            return "At-risk"
+        return "Regular"
+
+    by_segment = {}
+    for c in all_cases:
+        key = segment(c)
+        d = by_segment.setdefault(key, {"total": 0, "recovered": 0, "amount_recovered": 0.0})
+        d["total"] += 1
+        if c.recovered:
+            d["recovered"] += 1
+            d["amount_recovered"] += c.recovered_amount
 
     def with_rate(d):
         return {k: {**v, "recovery_rate": round(v["recovered"] / v["total"], 4) if v["total"] else 0}
@@ -429,6 +499,8 @@ def get_analytics(db: Session = Depends(get_db)):
         "by_failure_code": with_rate(by_failure),
         "by_recommended_action": with_rate(by_action),
         "by_status": by_status,
+        "by_customer_segment": with_rate(by_segment),
+        "statistical_significance": sig_test,
     }
 
 
